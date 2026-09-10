@@ -1,4 +1,4 @@
-# AI Disclousre
+# AI Disclosure
 Tools such as Claude Code were heavily used in the production of this project.
 
 # Deckycord
