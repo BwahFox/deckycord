@@ -15,6 +15,13 @@ Works on the Steam Deck (SteamOS) and on desktop-mode-free HTPCs running Bazzite
 > Deckycord drives a modified Discord client (Vesktop/Vencord). Discord's terms of service forbid
 > modified clients. In practice Discord tolerates Vencord, but use it at your own risk.
 
+## Please report issues
+
+Deckycord leans on Discord's and Vesktop's internals, which change without notice. If something
+stops working after a Discord or Vesktop update, or on hardware I do not have, **please open an
+[issue](https://github.com/BwahFox/deckycord/issues)** with what you did, what happened, and the
+plugin log from `~/homebrew/logs/deckycord/`. Reports are what keep this working.
+
 ## Features
 
 - **Overlay chat** in the Quick Access menu: DMs, friends, servers and channels on the left, the
@@ -85,13 +92,6 @@ installs onto a Steam Deck through Decky's own installer (no sudo needed on the 
   same "friends chat expanded" state Steam's own Friends tab uses).
 - `py_modules/capture.sh` + `grabloop.py`: `kmsgrab` capture of the real display, VAAPI scaled,
   fed to Vesktop either as a v4l2 camera or drawn onto the hidden display.
-
-## Please report issues
-
-Deckycord leans on Discord's and Vesktop's internals, which change without notice. If something
-stops working after a Discord or Vesktop update, or on hardware I do not have, **please open an
-[issue](https://github.com/BwahFox/deckycord/issues)** with what you did, what happened, and the
-plugin log from `~/homebrew/logs/deckycord/`. Reports are what keep this working.
 
 ## Known limitations
 
