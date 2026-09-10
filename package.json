@@ -1,6 +1,6 @@
 {
   "name": "deckycord",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Discord voice, chat, notifications and Go Live screensharing inside Decky Loader, driven with a controller",
   "type": "module",
   "scripts": {
