@@ -1,3 +1,6 @@
+# AI Disclousre
+Tools such as Claude Code were heavily used in the production of this project.
+
 # Deckycord
 
 Discord inside Steam's Gamepad UI, driven entirely with a controller: voice chat, text chat,
