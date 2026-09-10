@@ -1,0 +1,29 @@
+name: build
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Package for Decky (install from zip)
+        run: |
+          mkdir -p out/deckycord
+          cp -r dist main.py plugin.json package.json py_modules assets LICENSE README.md out/deckycord/
+          rm -rf out/deckycord/py_modules/__pycache__ out/deckycord/py_modules/vendor/__pycache__
+          (cd out && zip -qr deckycord.zip deckycord)
+      - uses: actions/upload-artifact@v4
+        with: { name: deckycord, path: out/deckycord.zip }
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with: { files: out/deckycord.zip }

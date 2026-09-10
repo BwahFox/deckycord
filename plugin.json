@@ -1,0 +1,17 @@
+{
+  "name": "Deckycord",
+  "author": "BwahFox",
+  "flags": [
+    "root"
+  ],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "discord",
+      "voice",
+      "chat"
+    ],
+    "description": "Discord voice, chat, notifications and Go Live screensharing, controller-first, backed by a hidden Vesktop.",
+    "image": "https://raw.githubusercontent.com/BwahFox/deckycord/main/assets/logo.png"
+  }
+}
