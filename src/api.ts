@@ -107,6 +107,15 @@ export interface Channels {
   text: TextChannel[];
   voice: VoiceChannel[];
 }
+/** A picture, GIF or video attached to a message or unfurled from a link in it. */
+export interface Media {
+  kind: "image" | "video";
+  url: string;
+  name: string;
+  poster?: string | null;
+  width: number;
+  height: number;
+}
 export interface Message {
   id: string;
   author: User | null;
@@ -114,6 +123,7 @@ export interface Message {
   timestamp: string | null;
   attachments: { url: string; name: string; type: string | null }[];
   embeds: number;
+  media: Media[];
   type: number;
   stickers: string[];
 }
@@ -191,6 +201,7 @@ export type DcEvent =
   | { type: "frames"; state: string }
   | { type: "share_paused"; name: string }
   | { type: "share_resumed"; ok: boolean; error?: string; name: string }
+  | { type: "message_update"; channelId: string; id: string }
   | { type: "ack"; channelId: string }
   | { type: "voice" }
   | { type: "speaking"; userId: string; speaking: boolean }

@@ -79,7 +79,8 @@ export default definePlugin(() => {
 
   const listener = addEventListener<[ev: DcEvent]>("dc_event", (ev) => {
     bus.emit(ev);
-    if (ev.type === "message" && ev.notify && bus.currentChannel !== ev.channelId) {
+    // No toast while that conversation is on screen; a hidden Quick Access panel does not count.
+    if (ev.type === "message" && ev.notify && !(bus.chatVisible && bus.currentChannel === ev.channelId)) {
       toaster.toast({
         title: ev.where ? `${ev.author} in ${ev.where}` : ev.author,
         body: ev.content || "New message",

@@ -1,8 +1,8 @@
 import { DialogButton, Focusable, TextField, Navigation, GamepadButton, GamepadEvent } from "@decky/ui";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { FaHashtag, FaVolumeUp, FaMicrophone, FaMicrophoneSlash, FaHeadphones, FaPhone, FaPhoneSlash, FaHome, FaPaperPlane, FaDesktop, FaExpand, FaCompress, FaTimes } from "react-icons/fa";
-import { api } from "./api";
-import { Avatar, Badge, Row, SectionLabel, VoiceUserList, colors, globalCss } from "./components";
+import { api, Media } from "./api";
+import { Avatar, Badge, MediaPreviews, MediaViewer, Row, SectionLabel, VoiceUserList, colors, globalCss } from "./components";
 import { bus } from "./bus";
 import { useChat, HOME } from "./useChat";
 
@@ -24,6 +24,7 @@ export function ChatPage() {
     draft, setDraft, error, hasMore, bottomRef, loadOlder, send, selectGuild, openText,
     shareBusy, toggleShare, callBusy, startCall, answerCall, declineCall, stopWatching, onWatchUser, joinVoice,
   } = c;
+  const [viewer, setViewer] = useState<Media[] | null>(null);
   const voiceBarRef = useRef<HTMLDivElement>(null);
   const firstVoiceRef = useRef<HTMLDivElement>(null);
   const railRef = useRef<HTMLDivElement>(null);
@@ -290,6 +291,8 @@ export function ChatPage() {
                 className="deckycord-msg"
                 focusClassName="deckycord-focus"
                 onActivate={() => {}}
+                onSecondaryButton={m.media.length ? () => setViewer(m.media) : undefined}
+                onSecondaryActionDescription={m.media.length ? (m.media.some((x) => x.kind === "video") ? "View media" : "View image") : undefined}
                 onGamepadFocus={i === 0 ? () => loadOlder() : undefined}
                 onOKActionDescription={m.author?.name ?? ""}
                 style={{ display: "flex", gap: 12, padding: grouped ? "1px 16px" : "8px 16px 1px", marginTop: grouped ? 0 : 6, borderRadius: 4 }}
@@ -303,15 +306,12 @@ export function ChatPage() {
                     </div>
                   )}
                   {m.content && <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.35 }}>{m.content}</div>}
-                  {m.attachments.map((a) =>
-                    a.type && a.type.startsWith("image/") ? (
-                      <img key={a.url} src={a.url} style={{ maxWidth: 320, maxHeight: 240, borderRadius: 6, marginTop: 4, display: "block" }} />
-                    ) : (
-                      <div key={a.url} style={{ color: colors.accent, fontSize: 13 }}>📎 {a.name}</div>
-                    )
-                  )}
+                  <MediaPreviews media={m.media} />
+                  {m.attachments.filter((a) => !(a.type && (a.type.startsWith("image/") || a.type.startsWith("video/")))).map((a) => (
+                    <div key={a.url} style={{ color: colors.accent, fontSize: 13 }}>📎 {a.name}</div>
+                  ))}
                   {m.stickers.length > 0 && <div style={{ color: colors.muted, fontSize: 13 }}>Sticker: {m.stickers.join(", ")}</div>}
-                  {m.embeds > 0 && !m.content && <div style={{ color: colors.muted, fontSize: 13 }}>[embed]</div>}
+                  {m.embeds > 0 && !m.content && !m.media.length && <div style={{ color: colors.muted, fontSize: 13 }}>[embed]</div>}
                 </div>
               </Focusable>
             );
@@ -340,6 +340,7 @@ export function ChatPage() {
           </Focusable>
         )}
       </Focusable>}
+      {viewer && <MediaViewer items={viewer} onClose={() => setViewer(null)} />}
     </Focusable>
   );
 }

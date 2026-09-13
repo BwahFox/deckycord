@@ -1,8 +1,8 @@
 import { ButtonItem, DialogButton, Focusable, GamepadButton, GamepadEvent, Navigation, PanelSection, PanelSectionRow, TextField, useQuickAccessVisible } from "@decky/ui";
 import { useEffect, useRef, useState } from "react";
 import { FaChevronLeft, FaCog, FaComments, FaDesktop, FaDiscord, FaHashtag, FaHeadphones, FaMicrophone, FaMicrophoneSlash, FaPaperPlane, FaPhone, FaPhoneSlash, FaVolumeUp, FaExternalLinkAlt, FaUserFriends, FaUserPlus } from "react-icons/fa";
-import { api, Friend, FriendRequest, Status, VoiceUser } from "./api";
-import { Avatar, Badge, VoiceUserList, globalCss } from "./components";
+import { api, Friend, FriendRequest, Media, Status, VoiceUser } from "./api";
+import { Avatar, Badge, MediaPreviews, MediaViewer, VoiceUserList, globalCss } from "./components";
 import { bus } from "./bus";
 import { useChat, HOME } from "./useChat";
 import { ensureQamCss, setQamExpanded } from "./qam";
@@ -47,29 +47,64 @@ function fmtTime(ts: string | null): string {
   return ts ? new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
 }
 
+/**
+ * Steam draws its button legend (A Open, X Decline, ...) only on full pages; the Quick Access
+ * menu has none, so the overlay draws its own strip. Controls declare their hints on a wrapper
+ * element and the strip follows focus (`focusin` on the overlay root).
+ */
+function Hinted({ a, x, children }: { a?: React.ReactNode; x?: React.ReactNode; children: React.ReactNode }) {
+  const txt = (v: React.ReactNode) => (typeof v === "string" && v ? v : undefined);
+  return <div data-hint-a={txt(a)} data-hint-x={txt(x)} style={{ display: "contents" }}>{children}</div>;
+}
+type Hints = { a?: string; x?: string };
+function Legend({ hints, chat }: { hints: Hints; chat: boolean }) {
+  const item = (keys: string[], label: string) => (
+    <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      {keys.map((k) => <Hint key={k} label={k} />)}
+      <span style={{ marginLeft: 2 }}>{label}</span>
+    </span>
+  );
+  const items = [
+    hints.a ? item(["A"], hints.a) : null,
+    hints.x ? item(["X"], hints.x) : null,
+    item(["L1", "R1"], "Tabs"),
+    chat ? item(["L2"], "Top") : null,
+    chat ? item(["R2"], "Newest") : null,
+    item(["B"], "Close"),
+  ].filter(Boolean);
+  return (
+    <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 30, display: "flex", alignItems: "center", gap: 14, padding: "0 16px", fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: steam.dim2, borderTop: `1px solid ${steam.line}`, background: steam.bg, boxSizing: "border-box", overflow: "hidden", whiteSpace: "nowrap" }}>
+      {items}
+    </div>
+  );
+}
+
 /** A Steam-Friends-styled focusable row. */
 function SRow({ children, onActivate, onSecondary, selected, tall, onOKActionDescription, onSecondaryActionDescription, innerRef }: {
   children: React.ReactNode; onActivate?: () => void; onSecondary?: () => void; selected?: boolean; tall?: boolean;
   onOKActionDescription?: React.ReactNode; onSecondaryActionDescription?: React.ReactNode; innerRef?: React.RefObject<HTMLDivElement | null>;
 }) {
   return (
-    <Focusable
-      ref={innerRef as any}
-      onActivate={onActivate}
-      onSecondaryButton={onSecondary}
-      onOKActionDescription={onOKActionDescription}
-      onSecondaryActionDescription={onSecondaryActionDescription}
-      focusClassName="deckycord-focus"
-      className={selected ? "deckycord-selected" : undefined}
-      style={{ display: "flex", alignItems: "center", gap: 10, padding: tall ? "4px 14px" : "2px 14px", minHeight: tall ? 44 : 39, background: selected ? steam.selected : "transparent", color: steam.text, fontSize: 16, boxSizing: "border-box" }}
-    >
-      {children}
-    </Focusable>
+    <Hinted a={onOKActionDescription} x={onSecondaryActionDescription}>
+      <Focusable
+        ref={innerRef as any}
+        onActivate={onActivate}
+        onSecondaryButton={onSecondary}
+        onOKActionDescription={onOKActionDescription}
+        onSecondaryActionDescription={onSecondaryActionDescription}
+        focusClassName="deckycord-focus"
+        className={selected ? "deckycord-selected" : undefined}
+        style={{ display: "flex", alignItems: "center", gap: 10, padding: tall ? "4px 14px" : "2px 14px", minHeight: tall ? 44 : 39, background: selected ? steam.selected : "transparent", color: steam.text, fontSize: 16, boxSizing: "border-box" }}
+      >
+        {children}
+      </Focusable>
+    </Hinted>
   );
 }
 
 export function Overlay({ status, refresh }: { status: Status; refresh: () => Promise<void> }) {
-  const c = useChat();
+  const visible = useQuickAccessVisible();
+  const c = useChat(visible);
   const {
     guilds, dms, guildId, channels, channelId, channelName, messages, loadingMsgs, voice, setVoice, dmCall,
     draft, setDraft, error, hasMore, bottomRef, loadOlder, send, selectGuild, openText,
@@ -126,7 +161,20 @@ export function Overlay({ status, refresh }: { status: Status; refresh: () => Pr
   const chatRef = useRef<HTMLDivElement>(null);
   const focusablesIn = (root: HTMLElement | null): HTMLElement[] =>
     root ? Array.from(root.querySelectorAll<HTMLElement>('[tabindex="0"], button, input')).filter((el) => el.offsetParent !== null && !(el as HTMLButtonElement).disabled) : [];
-  const visible = useQuickAccessVisible();
+
+  // Legend strip follows the focused control's declared hints.
+  const [hints, setHints] = useState<Hints>({});
+  const [viewer, setViewer] = useState<Media[] | null>(null);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const onFocus = (e: Event) => {
+      const t = (e.target as HTMLElement | null)?.closest?.<HTMLElement>("[data-hint-a],[data-hint-x]");
+      setHints({ a: t?.dataset.hintA, x: t?.dataset.hintX });
+    };
+    el.addEventListener("focusin", onFocus);
+    return () => el.removeEventListener("focusin", onFocus);
+  }, []);
 
   // Widen the Quick Access menu while our tab is the one showing; give it back otherwise.
   useEffect(() => {
@@ -191,9 +239,11 @@ export function Overlay({ status, refresh }: { status: Status; refresh: () => Pr
       flow-children="row"
       onButtonDown={onButtonDown}
       actionDescriptionMap={{ [GamepadButton.BUMPER_LEFT]: "Prev tab", [GamepadButton.BUMPER_RIGHT]: "Next tab", [GamepadButton.TRIGGER_LEFT]: guildId === HOME && channelId ? "Call" : "Top", [GamepadButton.TRIGGER_RIGHT]: "Newest" }}
-      style={{ display: "flex", position: "absolute", top: 56, left: 0, right: 0, bottom: 0, color: steam.text, fontSize: 16, overflow: "hidden", boxSizing: "border-box" }}
+      style={{ display: "flex", position: "absolute", top: 56, left: 0, right: 0, bottom: 0, paddingBottom: 30, color: steam.text, fontSize: 16, overflow: "hidden", boxSizing: "border-box" }}
     >
       <style>{globalCss}</style>
+      <Legend hints={hints} chat={!!channelId} />
+      {viewer && <MediaViewer items={viewer} onClose={() => setViewer(null)} />}
 
       {/* Left pane: tab strip + list, like Steam's friends list */}
       <Focusable flow-children="column" style={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column", borderRight: `1px solid ${steam.line}`, minHeight: 0 }}>
@@ -201,9 +251,11 @@ export function Overlay({ status, refresh }: { status: Status; refresh: () => Pr
         <Focusable flow-children="row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 16px 8px" }}>
           <Hint label="L1" />
           {TABS.map((t) => (
-            <Focusable key={t} focusClassName="deckycord-focus" onActivate={() => setTab(t)} onOKActionDescription={TAB_TITLE[t]} style={{ color: t === tab ? steam.white : steam.dim2, padding: 4, borderRadius: 4, display: "flex" }}>
-              {TAB_ICON[t]}
-            </Focusable>
+            <Hinted key={t} a={TAB_TITLE[t]}>
+              <Focusable focusClassName="deckycord-focus" onActivate={() => setTab(t)} onOKActionDescription={TAB_TITLE[t]} style={{ color: t === tab ? steam.white : steam.dim2, padding: 4, borderRadius: 4, display: "flex" }}>
+                {TAB_ICON[t]}
+              </Focusable>
+            </Hinted>
           ))}
           <Hint label="R1" />
         </Focusable>
@@ -246,9 +298,9 @@ export function Overlay({ status, refresh }: { status: Status; refresh: () => Pr
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <TextField value={addName} onChange={(e) => setAddName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); sendFriendRequest(); } }} style={{ width: "100%" }} description={undefined} />
                 </div>
-                <DialogButton style={{ minWidth: 0, width: 48, padding: "10px 0" }} disabled={!addName.trim() || addBusy} onClick={sendFriendRequest} onOKActionDescription="Send request">
+                <Hinted a={"Send request"}><DialogButton style={{ minWidth: 0, width: 48, padding: "10px 0" }} disabled={!addName.trim() || addBusy} onClick={sendFriendRequest} onOKActionDescription="Send request">
                   <FaUserPlus />
-                </DialogButton>
+                </DialogButton></Hinted>
               </Focusable>
               {addMsg && <div style={{ padding: "0 14px 6px", color: addMsg.startsWith("Could") ? steam.red : steam.green, fontSize: 13 }}>{addMsg}</div>}
               <SectionTitle>Friends · {friends.length}</SectionTitle>
@@ -311,18 +363,18 @@ export function Overlay({ status, refresh }: { status: Status; refresh: () => Pr
                     {v.guildName ? `${v.channelName} / ${v.guildName}` : v.channelName}
                   </div>
                   <Focusable flow-children="row" style={{ display: "flex", gap: 6, padding: "0 12px" }}>
-                    <DialogButton style={{ minWidth: 0, padding: "8px 0", flex: 1, background: v.mute ? steam.red : undefined }} onClick={() => api.toggleMute().then(setVoice)} onOKActionDescription={v.mute ? "Unmute" : "Mute"}>
+                    <Hinted a={v.mute ? "Unmute" : "Mute"}><DialogButton style={{ minWidth: 0, padding: "8px 0", flex: 1, background: v.mute ? steam.red : undefined }} onClick={() => api.toggleMute().then(setVoice)} onOKActionDescription={v.mute ? "Unmute" : "Mute"}>
                       {v.mute ? <FaMicrophoneSlash /> : <FaMicrophone />}
-                    </DialogButton>
-                    <DialogButton style={{ minWidth: 0, padding: "8px 0", flex: 1, background: v.deaf ? steam.red : undefined }} onClick={() => api.toggleDeaf().then(setVoice)} onOKActionDescription={v.deaf ? "Undeafen" : "Deafen"}>
+                    </DialogButton></Hinted>
+                    <Hinted a={v.deaf ? "Undeafen" : "Deafen"}><DialogButton style={{ minWidth: 0, padding: "8px 0", flex: 1, background: v.deaf ? steam.red : undefined }} onClick={() => api.toggleDeaf().then(setVoice)} onOKActionDescription={v.deaf ? "Undeafen" : "Deafen"}>
                       <FaHeadphones />
-                    </DialogButton>
-                    <DialogButton style={{ minWidth: 0, padding: "8px 0", flex: 1, background: v.video || v.streaming ? steam.green : undefined }} disabled={shareBusy} onClick={toggleShare} onOKActionDescription={v.video || v.streaming ? "Stop sharing" : shareBusy ? "Starting…" : "Share screen"}>
+                    </DialogButton></Hinted>
+                    <Hinted a={v.video || v.streaming ? "Stop sharing" : shareBusy ? "Starting…" : "Share screen"}><DialogButton style={{ minWidth: 0, padding: "8px 0", flex: 1, background: v.video || v.streaming ? steam.green : undefined }} disabled={shareBusy} onClick={toggleShare} onOKActionDescription={v.video || v.streaming ? "Stop sharing" : shareBusy ? "Starting…" : "Share screen"}>
                       <FaDesktop />
-                    </DialogButton>
-                    <DialogButton style={{ minWidth: 0, padding: "8px 0", flex: 1 }} onClick={() => api.leaveVoice().then(() => setTimeout(() => api.voice().then(setVoice), 500))} onOKActionDescription={v.isCall ? "Hang up" : "Disconnect"}>
+                    </DialogButton></Hinted>
+                    <Hinted a={v.isCall ? "Hang up" : "Disconnect"}><DialogButton style={{ minWidth: 0, padding: "8px 0", flex: 1 }} onClick={() => api.leaveVoice().then(() => setTimeout(() => api.voice().then(setVoice), 500))} onOKActionDescription={v.isCall ? "Hang up" : "Disconnect"}>
                       <FaPhoneSlash />
-                    </DialogButton>
+                    </DialogButton></Hinted>
                   </Focusable>
                   <div style={{ padding: "8px 12px" }}>
                     <VoiceUserList users={v.users.filter((u) => u.id !== bus.selfId)} compact plain onWatch={watchOnPage} watchingId={v.watching?.ownerId} />
@@ -361,9 +413,9 @@ export function Overlay({ status, refresh }: { status: Status; refresh: () => Pr
                 <div style={{ color: steam.dim, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{error ?? headerSub}</div>
               </div>
               {guildId === HOME && v?.channelId !== channelId && (
-                <DialogButton style={{ minWidth: 0, width: 48, padding: "6px 0", flexShrink: 0, background: dmCall?.active ? steam.green : undefined }} disabled={callBusy} onClick={startCall} onOKActionDescription={callBusy ? "Calling…" : dmCall?.active ? "Join call" : "Start call"}>
+                <Hinted a={callBusy ? "Calling…" : dmCall?.active ? "Join call" : "Start call"}><DialogButton style={{ minWidth: 0, width: 48, padding: "6px 0", flexShrink: 0, background: dmCall?.active ? steam.green : undefined }} disabled={callBusy} onClick={startCall} onOKActionDescription={callBusy ? "Calling…" : dmCall?.active ? "Join call" : "Start call"}>
                   <FaPhone />
-                </DialogButton>
+                </DialogButton></Hinted>
               )}
             </Focusable>
             {dmCall?.active && (
@@ -392,10 +444,13 @@ export function Overlay({ status, refresh }: { status: Status; refresh: () => Pr
                         <div style={{ flex: 1, height: 1, background: steam.line }} />
                       </div>
                     )}
+                    <Hinted x={m.media.length ? (m.media.some((x) => x.kind === "video") ? "View media" : "View image") : undefined}>
                     <Focusable
                       className="deckycord-msg"
                       focusClassName="deckycord-focus"
                       onActivate={() => {}}
+                      onSecondaryButton={m.media.length ? () => setViewer(m.media) : undefined}
+                      onSecondaryActionDescription={m.media.length ? "View image" : undefined}
                       onGamepadFocus={i === 0 ? () => loadOlder() : undefined}
                       onOKActionDescription={m.author?.name ?? ""}
                       style={{ display: "flex", gap: 10, padding: grouped ? "1px 6px" : "6px 6px 1px", marginTop: grouped ? 0 : 4, borderRadius: 3 }}
@@ -409,17 +464,15 @@ export function Overlay({ status, refresh }: { status: Status; refresh: () => Pr
                           </div>
                         )}
                         {m.content && <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.35, fontSize: 15, color: steam.text }}>{m.content}</div>}
-                        {m.attachments.map((a) =>
-                          a.type && a.type.startsWith("image/") ? (
-                            <img key={a.url} src={a.url} style={{ maxWidth: 300, maxHeight: 220, borderRadius: 4, marginTop: 4, display: "block" }} />
-                          ) : (
-                            <div key={a.url} style={{ color: steam.accent, fontSize: 13 }}>📎 {a.name}</div>
-                          )
-                        )}
+                        <MediaPreviews media={m.media} maxWidth={300} maxHeight={220} />
+                        {m.attachments.filter((a) => !(a.type && (a.type.startsWith("image/") || a.type.startsWith("video/")))).map((a) => (
+                          <div key={a.url} style={{ color: steam.accent, fontSize: 13 }}>📎 {a.name}</div>
+                        ))}
                         {m.stickers.length > 0 && <div style={{ color: steam.dim, fontSize: 13 }}>Sticker: {m.stickers.join(", ")}</div>}
-                        {m.embeds > 0 && !m.content && <div style={{ color: steam.dim, fontSize: 13 }}>[embed]</div>}
+                        {m.embeds > 0 && !m.content && !m.media.length && <div style={{ color: steam.dim, fontSize: 13 }}>[embed]</div>}
                       </div>
                     </Focusable>
+                    </Hinted>
                   </div>
                 );
               })}
@@ -440,9 +493,9 @@ export function Overlay({ status, refresh }: { status: Status; refresh: () => Pr
                   description={undefined}
                 />
               </div>
-              <DialogButton style={{ minWidth: 0, width: 52, padding: "10px 0" }} onClick={send} disabled={!draft.trim()} onOKActionDescription="Send">
+              <Hinted a={"Send"}><DialogButton style={{ minWidth: 0, width: 52, padding: "10px 0" }} onClick={send} disabled={!draft.trim()} onOKActionDescription="Send">
                 <FaPaperPlane />
-              </DialogButton>
+              </DialogButton></Hinted>
             </Focusable>
           </>
         ) : (

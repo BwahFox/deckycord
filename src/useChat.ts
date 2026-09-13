@@ -8,7 +8,7 @@ export const HOME = "@me";
  * All chat state and actions, shared by the full page (/deckycord) and the Quick Access overlay.
  * Only one of them is mounted at a time.
  */
-export function useChat() {
+export function useChat(visible = true) {
   const [guilds, setGuilds] = useState<Guild[]>([]);
   const [dms, setDms] = useState<DM[]>([]);
   const [guildId, setGuildId] = useState<string>(HOME);
@@ -65,7 +65,8 @@ export function useChat() {
       const m = await api.messages(cid, quiet ? Math.max(50, loadedCount.current) : 50);
       loadedCount.current = m.length;
       setMessages(m);
-      api.ack(cid).catch(() => {});
+      // Only mark as read when the conversation is actually on screen.
+      if (bus.chatVisible) api.ack(cid).catch(() => {});
     } catch (e) {
       setError(String(e));
     } finally {
@@ -124,6 +125,17 @@ export function useChat() {
     loadDmCall(channelId, guildId);
   }, [channelId, guildId, loadDmCall]);
 
+  const wasVisible = useRef(false);
+  useEffect(() => {
+    bus.chatVisible = visible;
+    // Coming back on screen: catch up and mark what is now visible as read.
+    if (visible && !wasVisible.current && channelId) loadMessages(channelId, true);
+    wasVisible.current = visible;
+    return () => {
+      bus.chatVisible = false;
+    };
+  }, [visible, channelId, loadMessages]);
+
   useEffect(() => {
     bus.currentChannel = channelId;
     setHasMore(true);
@@ -134,9 +146,13 @@ export function useChat() {
     };
   }, [channelId, loadMessages]);
 
+  // Scroll to the newest message when it changes (channel opened, message received or sent).
+  // Keyed on its id, not the count: a reload after sending returns the same number of messages,
+  // and loading older history changes the count without changing the newest message.
+  const newestId = messages.length ? messages[messages.length - 1].id : null;
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length]);
+  }, [newestId]);
 
   // Live updates pushed from the backend.
   useEffect(() => {
@@ -145,6 +161,8 @@ export function useChat() {
         if (ev.channelId === channelId) loadMessages(ev.channelId, true);
         else if (guildId === HOME) api.dms().then(setDms).catch(() => {});
         else loadChannels(guildId);
+      } else if (ev.type === "message_update") {
+        if (ev.channelId === channelId) loadMessages(ev.channelId, true);
       } else if (ev.type === "voice" || ev.type === "rtc") {
         api.voice().then(setVoice).catch(() => {});
         if (guildId !== HOME) loadChannels(guildId);

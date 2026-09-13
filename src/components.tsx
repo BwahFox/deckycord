@@ -1,7 +1,7 @@
-import { Focusable, PanelSectionRow } from "@decky/ui";
-import { CSSProperties, ReactNode, RefObject } from "react";
+import { Focusable, GamepadButton, GamepadEvent, PanelSectionRow } from "@decky/ui";
+import { CSSProperties, ReactNode, RefObject, useEffect, useRef, useState } from "react";
 import { FaMicrophoneSlash, FaHeadphones } from "react-icons/fa";
-import { VoiceUser } from "./api";
+import { Media, VoiceUser } from "./api";
 
 export const colors = {
   bg: "#1e1f22",
@@ -143,6 +143,69 @@ export function VoiceUserList({ users, compact, onWatch, watchingId, plain }: { 
     return <div key={u.id} style={style}>{inner}</div>;
   });
   return compact && !plain ? <PanelSectionRow><div>{rows}</div></PanelSectionRow> : <div>{rows}</div>;
+}
+
+/** Inline previews of a message's pictures, GIFs and videos. GIF links (tenor, giphy) come from
+ *  Discord as short mp4s, so they play as muted looping videos. */
+export function MediaPreviews({ media, maxWidth = 320, maxHeight = 240 }: { media: Media[]; maxWidth?: number; maxHeight?: number }) {
+  if (!media.length) return null;
+  const style: CSSProperties = { maxWidth, maxHeight, borderRadius: 6, marginTop: 4, display: "block", background: "#000" };
+  return (
+    <>
+      {media.map((m, i) =>
+        m.kind === "video" ? (
+          <video key={m.url + i} src={m.url} poster={m.poster ?? undefined} autoPlay loop muted playsInline style={style} />
+        ) : (
+          <img key={m.url + i} src={m.url} style={style} />
+        )
+      )}
+    </>
+  );
+}
+
+/**
+ * Full-screen viewer for a message's media (X on a message). B closes, left/right or A step
+ * through several items. Rendered fixed over whichever window it is mounted in.
+ */
+export function MediaViewer({ items, index = 0, onClose }: { items: Media[]; index?: number; onClose: () => void }) {
+  const [i, setI] = useState(index);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const t = setTimeout(() => ref.current?.focus(), 30);
+    return () => clearTimeout(t);
+  }, []);
+  const n = items.length;
+  const step = (d: number) => setI((x) => (x + d + n) % n);
+  const onButtonDown = (evt: GamepadEvent) => {
+    const b = evt.detail.button;
+    if (b === GamepadButton.DIR_LEFT || b === GamepadButton.BUMPER_LEFT) { step(-1); evt.stopPropagation(); }
+    else if (b === GamepadButton.DIR_RIGHT || b === GamepadButton.BUMPER_RIGHT) { step(1); evt.stopPropagation(); }
+  };
+  const m = items[i];
+  if (!m) return null;
+  const fit: CSSProperties = { maxWidth: "100%", maxHeight: "100%", objectFit: "contain" };
+  return (
+    <Focusable
+      ref={ref as any}
+      onCancelButton={onClose}
+      onCancelActionDescription="Close"
+      onActivate={n > 1 ? () => step(1) : onClose}
+      onOKActionDescription={n > 1 ? "Next" : "Close"}
+      onButtonDown={onButtonDown}
+      style={{ position: "fixed", inset: 0, zIndex: 10000, background: "rgba(0,0,0,0.94)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, boxSizing: "border-box" }}
+    >
+      <div style={{ flex: 1, minHeight: 0, width: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {m.kind === "video" ? (
+          <video key={m.url} src={m.url} poster={m.poster ?? undefined} autoPlay loop muted playsInline style={fit} />
+        ) : (
+          <img key={m.url} src={m.url} style={fit} />
+        )}
+      </div>
+      <div style={{ marginTop: 10, fontSize: 12, color: colors.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>
+        {n > 1 ? `${i + 1} / ${n} · ` : ""}{m.name}{m.width ? ` · ${m.width}×${m.height}` : ""}
+      </div>
+    </Focusable>
+  );
 }
 
 export const globalCss = `

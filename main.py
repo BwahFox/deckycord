@@ -100,8 +100,8 @@ class Plugin:
     _suspended: bool = False
     _balance: int = 0
     _balance_watch: Optional[asyncio.Task] = None
-    # Let Discord (Chromium's WebRTC) adjust the mic volume. Off by default: it tends to turn the
-    # mic down until the speaker is inaudible, and Discord's own AGC toggle does not stop it.
+    # Let Discord (Chromium's WebRTC) adjust the mic volume. Off by default: the mic kept
+    # being turned down to inaudible, and Discord's own AGC toggle does not stop it.
     _agc: bool = False
 
     # ---------- lifecycle ----------
@@ -219,7 +219,9 @@ class Plugin:
         async with self._lock:
             if self.cdp.connected and self._bridge_ok:
                 try:
-                    if await self.cdp.eval("typeof __dc === 'object' ? __dc.v : 0", timeout=5):
+                    # v alone was not enough: a bridge installed before Discord finished loading
+                    # answered calls but had no event subscriptions.
+                    if await self.cdp.eval("typeof __dc === 'object' && __dc.v && typeof __dc.ready === 'function' && __dc.ready()", timeout=5):
                         return
                 except CDPError:
                     pass
@@ -234,6 +236,11 @@ class Plugin:
                 await self.cdp.send("Runtime.addBinding", {"name": "__dcEvent"})
                 await self.cdp.send("Page.addScriptToEvaluateOnNewDocument", {"source": ON_NEW_DOC})
             res = await self.cdp.eval(BRIDGE_JS, timeout=10)
+            if res == "not-ready":
+                # Discord is still loading; give it a moment and try once more before giving up
+                # to the caller (the watchdog retries every few seconds anyway).
+                await asyncio.sleep(2)
+                res = await self.cdp.eval(BRIDGE_JS, timeout=10)
             decky.logger.info("bridge install: %s", res)
             self._bridge_ok = res in ("installed", "present")
             if not self._bridge_ok:
@@ -613,7 +620,7 @@ class Plugin:
         return {"paused": True}
 
     async def _resume_after(self, name: str, delay: float = 20):
-        """Restart the stream a fixed delay after a game launch (predictable beats CPU heuristics)."""
+        """Restart the stream a fixed delay after a game launch (predictable beats clever)."""
         try:
             await asyncio.sleep(delay)
             decky.logger.info("resuming stream %.0fs after %s launched", delay, name or "a game")

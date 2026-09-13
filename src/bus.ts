@@ -7,6 +7,9 @@ type Handler = (ev: BusEvent) => void;
 class Bus {
   private handlers = new Set<Handler>();
   currentChannel: string | null = null;
+  /** Whether a chat UI showing `currentChannel` is actually on screen (the Quick Access panel
+   *  stays mounted while the menu is closed). */
+  chatVisible = false;
   selfId: string | null = null;
   /** Channel to open when the chat page next mounts (set by a notification click). */
   pendingChannel: string | null = null;

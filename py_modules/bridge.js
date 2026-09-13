@@ -61,19 +61,26 @@
   // removeRelationship(userId, context) (also declines an incoming request), sendRequest({discordTag, context}).
   const RelActions = lazy(() => byProps("sendRequest", "acceptFriendRequest", "removeRelationship"));
   const relCtx = { location: "Friends" };
-  const Dispatcher = C.FluxDispatcher;
+  const Dispatcher = C.FluxDispatcher || byProps("dispatch", "subscribe", "_subscriptions");
+  // Installing right after a page load, before Discord's modules exist, left a bridge with no
+  // event subscriptions that still answered calls, so nothing retried. Refuse until ready; the
+  // installers poll on "not-ready".
+  if (!Dispatcher || !S.User || !S.Channel) return "not-ready";
 
   const str = (x) => (x == null ? null : String(x));
 
   function userInfo(u, guildId) {
     if (!u) return null;
+    // Raw API user objects (from a REST fetch) have no methods; prefer the store's record.
+    u = (u.id && safe(() => S.User.getUser(u.id))) || u;
     let nick = null;
     if (guildId) nick = safe(() => S.GuildMember.getNick(guildId, u.id)) || safe(() => S.GuildMember.getMember(guildId, u.id)?.nick) || null;
+    const rawAvatar = u.avatar && typeof u.avatar === "string" ? `https://cdn.discordapp.com/avatars/${u.id}/${u.avatar}.${u.avatar.startsWith("a_") ? "gif" : "webp"}?size=64` : null;
     return {
       id: u.id,
-      name: nick || u.globalName || u.username,
+      name: nick || u.globalName || u.global_name || u.username,
       username: u.username,
-      avatar: safe(() => u.getAvatarURL(guildId || null, 64, false)) || null,
+      avatar: safe(() => u.getAvatarURL(guildId || null, 64, false)) || rawAvatar,
       bot: !!u.bot,
     };
   }
@@ -237,9 +244,67 @@
     }).filter(Boolean);
   }
 
+  // ---- Message history ----
+  const snowflake = (id) => { try { return BigInt(id); } catch (e) { return 0n; } };
+  // Discord keeps a bounded window of messages per channel. Scrolling back past it drops the
+  // newest ones (hasMoreAfter), a reconnect can leave it not ready, and new messages are not
+  // appended to a window that no longer reaches the end; each of those means "refetch".
+  function cacheStale(coll, ch) {
+    if (!coll || coll.ready === false || coll.hasMoreAfter) return true;
+    const arr = coll.toArray();
+    const newest = arr.length ? arr[arr.length - 1].id : null;
+    const last = ch && ch.lastMessageId;
+    return !!(last && newest && snowflake(last) > snowflake(newest));
+  }
+  const verifiedTail = {};
+  async function restMessages(channelId, limit) {
+    try {
+      const r = await C.RestAPI.get({ url: C.Constants.Endpoints.MESSAGES(channelId), query: { limit }, oldFormErrors: true });
+      const body = r && r.body;
+      return Array.isArray(body) ? body.slice().reverse() : null;
+    } catch (e) { return null; }
+  }
+  // Pictures/GIFs/videos of a message: attachments plus what Discord unfurled from links. Store
+  // embeds are camelCase (proxyURL), REST ones snake_case (proxy_url); both are handled.
+  function mediaOf(m) {
+    const out = [];
+    const src = (x) => (x ? x.proxyURL || x.proxy_url || x.url : null);
+    for (const a of m.attachments || []) {
+      const t = a.content_type || a.contentType || "";
+      if (t.startsWith("image/") || t.startsWith("video/")) out.push({ kind: t.startsWith("video/") ? "video" : "image", url: src(a) || a.url, name: a.filename, width: a.width || 0, height: a.height || 0 });
+    }
+    for (const e of m.embeds || []) {
+      const type = e.type;
+      const video = e.video, image = e.image, thumb = e.thumbnail;
+      const name = e.url || "";
+      if (type === "gifv" && src(video)) out.push({ kind: "video", url: src(video), poster: src(thumb), name, width: video.width || 0, height: video.height || 0 });
+      else if (type === "image" && (src(image) || src(thumb))) { const i = src(image) ? image : thumb; out.push({ kind: "image", url: src(i), name, width: i.width || 0, height: i.height || 0 }); }
+      else if (type === "video" && video && /\.(mp4|webm|mov)(\?|$)/i.test(video.url || "")) out.push({ kind: "video", url: src(video), poster: src(thumb), name, width: video.width || 0, height: video.height || 0 });
+      else if (type === "article" && src(thumb)) out.push({ kind: "image", url: src(thumb), name, width: thumb.width || 0, height: thumb.height || 0 });
+      else if (type === "rich" && src(image)) out.push({ kind: "image", url: src(image), name, width: image.width || 0, height: image.height || 0 });
+    }
+    return out;
+  }
+  function mapMessages(arr, channelId) {
+    const ch = S.Channel.getChannel(channelId);
+    const gid = ch ? ch.guild_id || null : null;
+    return arr.map((m) => ({
+      id: m.id,
+      author: userInfo(m.author, gid),
+      content: m.content || "",
+      timestamp: m.timestamp ? (m.timestamp.toISOString ? m.timestamp.toISOString() : String(m.timestamp)) : null,
+      attachments: (m.attachments || []).map((a) => ({ url: a.url, name: a.filename, type: a.content_type || null })),
+      embeds: (m.embeds || []).length,
+      media: mediaOf(m),
+      type: m.type,
+      stickers: (m.stickerItems || m.sticker_items || []).map((s) => s.name),
+    }));
+  }
+
   const api = {
     v: VERSION,
     state() {
+      ensureSoundHook();
       const me = currentUser();
       const onLogin = location.pathname.startsWith("/login") || location.pathname.startsWith("/register");
       return {
@@ -250,6 +315,8 @@
         calls: incomingCalls(),
       };
     },
+    // Healthy = event subscriptions are in place (the backend re-installs otherwise).
+    ready() { return !!(window.__dcSubs && Object.keys(window.__dcSubs).length && window.__dcEvent); },
     stores() {
       const out = {};
       for (const k of Object.keys(storeNames)) out[k] = !!S[k];
@@ -322,32 +389,34 @@
     },
     async messages(channelId, limit) {
       limit = limit || 50;
+      const ch = S.Channel.getChannel(channelId);
       let coll = S.Message.getMessages(channelId);
       let arr = coll ? coll.toArray() : [];
-      if (arr.length < limit && (!coll || coll.hasMoreBefore !== false || !coll.ready)) {
-        try { await MsgActions.fetchMessages({ channelId, limit }); } catch (e) { /* ignore */ }
+      if (arr.length < limit || cacheStale(coll, ch)) {
+        try { await MsgActions.fetchMessages({ channelId, limit: Math.min(100, Math.max(limit, 50)) }); } catch (e) { /* ignore */ }
         coll = S.Message.getMessages(channelId);
         arr = coll ? coll.toArray() : [];
       }
-      const ch = S.Channel.getChannel(channelId);
-      const gid = ch ? ch.guild_id || null : null;
-      return arr.slice(-limit).map((m) => ({
-        id: m.id,
-        author: userInfo(m.author, gid),
-        content: m.content || "",
-        timestamp: m.timestamp ? (m.timestamp.toISOString ? m.timestamp.toISOString() : String(m.timestamp)) : null,
-        attachments: (m.attachments || []).map((a) => ({ url: a.url, name: a.filename, type: a.content_type || null })),
-        embeds: (m.embeds || []).length,
-        type: m.type,
-        stickers: (m.stickerItems || m.sticker_items || []).map((s) => s.name),
-      }));
+      // Discord's fetchMessages serves from its cache when it believes the cache is current, so a
+      // cache that still does not reach the channel's last message is refreshed straight from the
+      // API. Remember what we verified so a deleted last message does not cost a request per call.
+      if (cacheStale(coll, ch)) {
+        const newest = arr.length ? arr[arr.length - 1].id : null;
+        const mark = `${ch && ch.lastMessageId}:${newest}`;
+        if (verifiedTail[channelId] !== mark) {
+          const fresh = await restMessages(channelId, Math.min(100, limit));
+          verifiedTail[channelId] = mark;
+          if (fresh) return mapMessages(fresh, channelId);
+        }
+      }
+      return mapMessages(arr.slice(-limit), channelId);
     },
     async older(channelId, beforeId, limit) {
       limit = limit || 50;
       try { await MsgActions.fetchMessages({ channelId, before: beforeId, limit }); } catch (e) { /* ignore */ }
       const coll = S.Message.getMessages(channelId);
       const arr = coll ? coll.toArray() : [];
-      return { messages: await api.messages(channelId, arr.length || limit), hasMore: coll ? coll.hasMoreBefore !== false : false };
+      return { messages: mapMessages(arr, channelId), hasMore: coll ? coll.hasMoreBefore !== false : false };
     },
     async send(channelId, text) {
       // signature: sendMessage(channelId, message, waitForChannelReady = true, options = {nonce?...})
@@ -662,13 +731,20 @@
     if (me && authorId === me.id) return null;
     const ch = S.Channel.getChannel(p.channelId);
     const isDM = !!ch && (ch.type === 1 || ch.type === 3);
-    const mentionsMe = !!me && (
-      (m.mentions || []).some((u) => (u && (u.id || u)) === me.id) ||
-      !!(m.mention_everyone || m.mentionEveryone)
-    );
     const guildId = ch ? ch.guild_id || null : null;
-    const muted = !!safe(() => guildId && C.UserGuildSettingsStore.isGuildOrCategoryOrChannelMuted(guildId, p.channelId), false)
-      || !!safe(() => C.UserGuildSettingsStore.isChannelMuted(guildId, p.channelId), false);
+    const UGS = C.UserGuildSettingsStore;
+    const member = guildId && me ? safe(() => S.GuildMember.getMember(guildId, me.id)) : null;
+    const myRoles = (member && member.roles) || [];
+    const everyone = !!(m.mention_everyone || m.mentionEveryone) && !safe(() => UGS.isSuppressEveryoneEnabled(guildId), false);
+    const role = (m.mention_roles || m.mentionRoles || []).some((r) => myRoles.includes(r)) && !safe(() => UGS.isSuppressRolesEnabled(guildId), false);
+    const mentionsMe = !!me && ((m.mentions || []).some((u) => (u && (u.id || u)) === me.id) || everyone || role);
+    // Channel set to "All Messages" (or inheriting that from the server) notifies like a DM.
+    const notifyAll = !!guildId && safe(() => {
+      const lvl = UGS.getChannelMessageNotifications(guildId, p.channelId);
+      return (lvl == null || lvl === 3 ? UGS.getMessageNotifications(guildId) : lvl) === 0;
+    }, false);
+    const muted = !!safe(() => guildId && UGS.isGuildOrCategoryOrChannelMuted(guildId, p.channelId), false)
+      || !!safe(() => UGS.isChannelMuted(guildId, p.channelId), false);
     const guild = guildId ? S.Guild.getGuild(guildId) : null;
     const author = m.author ? (m.author.global_name || m.author.globalName || m.author.username) : "Someone";
     let content = m.content || "";
@@ -684,7 +760,7 @@
       avatar: safe(() => S.User.getUser(authorId)?.getAvatarURL(null, 64, false)) || null,
       where: isDM ? (ch.type === 3 ? channelDisplayName(ch) : null) : `#${ch ? ch.name : "?"}${guild ? " \u00b7 " + guild.name : ""}`,
       content: content.slice(0, 160),
-      notify: !muted && (isDM || mentionsMe),
+      notify: !muted && (isDM || mentionsMe || notifyAll),
       dm: isDM,
     };
   }
@@ -745,6 +821,8 @@
 
   const subs = {
     MESSAGE_CREATE: (p) => { const d = describeIncoming(p); if (d) emit(d); },
+    // Link previews (images, GIFs) arrive as an update shortly after the message itself.
+    MESSAGE_UPDATE: (p) => { if (p && p.message && p.message.channel_id) emit({ type: "message_update", channelId: p.message.channel_id, id: p.message.id }); },
     CALL_CREATE: onCallChange,
     CALL_UPDATE: onCallChange,
     CALL_DELETE: onCallChange,
@@ -850,6 +928,50 @@
     }
     window.__dcPCHook = HOOK_VERSION;
   }
+  // Steam shows (and sounds) its own toast for messages, so Discord's message/mention sounds
+  // would play twice. Sounds go through Discord's Sound classes (name, play(), ensureAudio());
+  // silence the message ones on their prototypes. Voice sounds (join/leave, mute, ring) still play.
+  // Vencord's findByCode throws on this build (a half-initialised module), and the sound module
+  // loads lazily, so scan the webpack cache by prototype shape and keep retrying from state().
+  const SOUND_HOOK = 2;
+  const quietSound = (name) => /^(message\d*|mention\d*|[a-z]+_message)$/i.test(String(name || ""));
+  function findSoundClasses() {
+    const out = [];
+    const test = (v) => { try { if (typeof v === "function" && v.prototype && typeof v.prototype.play === "function" && typeof v.prototype.ensureAudio === "function") out.push(v); } catch (e) { /* ignore */ } };
+    for (const id in W.cache) {
+      try {
+        const m = W.cache[id];
+        if (!m || !m.loaded || !m.exports) continue;
+        const ex = m.exports;
+        test(ex);
+        if (typeof ex === "object" || typeof ex === "function") for (const k of Object.keys(ex)) { let v; try { v = ex[k]; } catch (e) { continue; } test(v); }
+      } catch (e) { /* ignore */ }
+    }
+    return out;
+  }
+  let soundHookTried = 0;
+  function ensureSoundHook() {
+    if (window.__dcSoundHook === SOUND_HOOK) return true;
+    if (Date.now() - soundHookTried < 20000) return false;
+    soundHookTried = Date.now();
+    const classes = findSoundClasses();
+    if (!classes.length) return false;
+    window.__dcSoundPlayOrig = window.__dcSoundPlayOrig || new Map();
+    for (const cls of classes) {
+      const proto = cls.prototype;
+      const orig = window.__dcSoundPlayOrig.get(proto) || proto.play;
+      window.__dcSoundPlayOrig.set(proto, orig);
+      proto.play = function (...args) {
+        if (quietSound(this.name) && !window.__dcAllowSounds) return;
+        return orig.apply(this, args);
+      };
+    }
+    window.__dcSoundHook = SOUND_HOOK;
+    window.__dcSoundHookCount = classes.length;
+    return true;
+  }
+  api.soundHook = () => (ensureSoundHook() ? window.__dcSoundHookCount || 1 : null);
+  ensureSoundHook();
   window.__dc = api;
   return "installed";
 })()
