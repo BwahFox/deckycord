@@ -5,6 +5,7 @@ import os
 import pwd
 import re
 import subprocess
+import time
 from typing import Any, Optional
 
 import decky
@@ -32,6 +33,17 @@ ON_NEW_DOC = """
   }, 500);
 })();
 """ % BRIDGE_JS
+
+# Ask Vencord's own updater (inside Vesktop) for a newer build and install it.
+VENCORD_UPDATE_JS = """
+(async () => {
+  const U = window.Vencord && Vencord.Updater;
+  if (!U || typeof U.checkForUpdates !== "function") return "no-updater";
+  try { if (!(await U.checkForUpdates())) return "current"; } catch (e) { return "check-failed: " + e; }
+  try { return (await U.update()) ? "updated" : "update-failed: " + String(U.updateError); }
+  catch (e) { return "update-failed: " + e; }
+})()
+"""
 
 
 def _user() -> str:
@@ -88,6 +100,7 @@ class Plugin:
     _watch: Optional[asyncio.Task] = None
     _last_status: Optional[str] = None
     _bridge_ok: bool = False
+    _attached_at: float = 0.0
     _frame: bytes = b""
     _frame_seq: int = 0
     _frame_cond: asyncio.Condition
@@ -186,6 +199,33 @@ class Plugin:
                 decky.logger.debug("watchdog: %s", e)
             await asyncio.sleep(5)
 
+    # ---------- Vencord self-update ----------
+    # Vesktop ships a fixed Vencord, and Discord's bundler changes break it (2026-11: rspack's new
+    # 3-argument __webpack_require__.d left module exports empty, so Discord crashed before the
+    # login screen). Vencord's own updater only runs after Discord boots, so it can't recover
+    # by itself; we drive it over CDP. Updates land in Vesktop's vencordFiles and load next start.
+    _vencord_checked: float = 0.0
+    _vencord_updated: bool = False
+
+    async def _maybe_update_vencord(self) -> bool:
+        """Install a Vencord update if one exists. Returns True if one was installed just now."""
+        now = time.monotonic()
+        if self._vencord_checked and now - self._vencord_checked < 1800:
+            return False
+        self._vencord_checked = now
+        try:
+            res = await self.cdp.eval(VENCORD_UPDATE_JS, timeout=120)
+        except CDPError as e:
+            decky.logger.warning("vencord update check failed: %s", e)
+            return False
+        decky.logger.info("vencord update: %s", res)
+        if res == "no-updater" or str(res).startswith("check-failed"):
+            self._vencord_checked = 0.0  # page not ready or offline; try again on the next pass
+        if res == "updated":
+            self._vencord_updated = True
+            return True
+        return False
+
     # ---------- CDP / bridge ----------
     def _is_discord_page(self, t: dict) -> bool:
         return t.get("type") == "page" and "discord.com" in (t.get("url") or "")
@@ -235,12 +275,23 @@ class Plugin:
                 await self.cdp.send("Page.enable")
                 await self.cdp.send("Runtime.addBinding", {"name": "__dcEvent"})
                 await self.cdp.send("Page.addScriptToEvaluateOnNewDocument", {"source": ON_NEW_DOC})
+                self._attached_at = time.monotonic()
+                await self._maybe_update_vencord()
             res = await self.cdp.eval(BRIDGE_JS, timeout=10)
             if res == "not-ready":
                 # Discord is still loading; give it a moment and try once more before giving up
                 # to the caller (the watchdog retries every few seconds anyway).
                 await asyncio.sleep(2)
                 res = await self.cdp.eval(BRIDGE_JS, timeout=10)
+            if res == "not-ready" and time.monotonic() - self._attached_at > 45:
+                # Discord should have booted by now. If Vencord is stale, it never will:
+                # update it (or use the update already installed) and relaunch Vesktop.
+                if await self._maybe_update_vencord() or self._vencord_updated:
+                    decky.logger.info("discord did not boot; restarting vesktop to load updated vencord")
+                    self._vencord_updated = False
+                    self._attached_at = time.monotonic()
+                    await self.restart_backend()
+                    raise CDPError("bridge not installed: restarting for vencord update")
             decky.logger.info("bridge install: %s", res)
             self._bridge_ok = res in ("installed", "present")
             if not self._bridge_ok:

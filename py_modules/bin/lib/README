@@ -1,0 +1,4 @@
+libnettle.so.8 (GNU Nettle 3.10.1, LGPLv3+/GPLv2+, unmodified; source: https://www.lysator.liu.se/~nisse/nettle/)
+The bundled Xvfb was built on SteamOS 3.8 and links libnettle.so.8 (only for SHA-1).
+SteamOS 3.9 ships nettle 4 (libnettle.so.9) only, so start_vesktop.sh puts this directory on
+Xvfb's LD_LIBRARY_PATH when it falls back to the bundled Xvfb.
